@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "بيان — Bayan Translator (Trial)",
-  "version": "0.8.9",
+  "version": "0.8.12",
   "description": "ترجمة عربية بنافذة عائمة وزر قابل للتخصيص — نسخة تجريبية لـ Vivaldi.",
   "permissions": [
     "storage",

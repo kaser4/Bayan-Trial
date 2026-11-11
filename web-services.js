@@ -68,9 +68,48 @@ function splitWebText(text,limit){
  while(remaining.length>limit){let cut=remaining.lastIndexOf(' ',limit);const newline=remaining.lastIndexOf('\n',limit);cut=Math.max(cut,newline);if(cut<limit/3)cut=limit;else cut++;if(/[\uD800-\uDBFF]/.test(remaining[cut-1]))cut--;parts.push(remaining.slice(0,cut));remaining=remaining.slice(cut);}
  if(remaining)parts.push(remaining);return parts;
 }
-async function webFetch(url,options={}){
- let response;try{response=await fetch(url,{...options,signal:options.signal||AbortSignal.timeout(18000),credentials:options.credentials||'omit'});}catch(e){if(e.name==='AbortError')throw e;throw Error('تعذر الاتصال بخدمة الترجمة.');}
+let webFetchBackoffUntil=0;
+async function webFetchRaw(url,options={}){
+ const {bayanPriority,...fetchOptions}=options;
+ let response;try{response=await fetch(url,{...fetchOptions,signal:fetchOptions.signal||AbortSignal.timeout(18000),credentials:fetchOptions.credentials||'omit'});}catch(e){if(e.name==='AbortError')throw e;throw Error('تعذر الاتصال بخدمة الترجمة.');}
  if(!response.ok)throw Error(response.status===429?'الخدمة حدّت الطلبات مؤقتًا.':`خدمة الويب غير متاحة (${response.status}).`);return response;
+}
+// Priority pool: foreground scroll stays snappy; background work yields and is capped.
+const webFetchPool={limit:4,active:0,waiters:[]};
+function webFetchPriorityValue(options={}){return options.bayanPriority==='low'?1:0;}
+function webFetchPump(){
+ webFetchPool.waiters.sort((a,b)=>a.priority-b.priority||a.seq-b.seq);
+ while(webFetchPool.active<webFetchPool.limit&&webFetchPool.waiters.length){
+  const next=webFetchPool.waiters.shift();
+  webFetchPool.active++;
+  next.resolve();
+ }
+}
+let webFetchWaitSeq=0;
+function webFetchAcquire(priority){
+ if(webFetchPool.active<webFetchPool.limit&&!webFetchPool.waiters.some(w=>w.priority<priority)){
+  webFetchPool.active++;
+  return Promise.resolve();
+ }
+ return new Promise(resolve=>{webFetchPool.waiters.push({priority,seq:++webFetchWaitSeq,resolve});webFetchPump();});
+}
+function webFetchRelease(){webFetchPool.active=Math.max(0,webFetchPool.active-1);webFetchPump();}
+async function webFetch(url,options={}){
+ const priority=webFetchPriorityValue(options);
+ await webFetchAcquire(priority);
+ try{
+  for(let attempt=0;attempt<5;attempt++){
+   const wait=Math.max(0,webFetchBackoffUntil-Date.now());
+   if(wait)await new Promise(resolve=>setTimeout(resolve,wait));
+   try{return await webFetchRaw(url,options);}
+   catch(e){
+    const limited=/حدّت|429/.test(e.message||'');
+    if(!limited||attempt===4)throw e;
+    const delay=Math.min(30000,800*Math.pow(2,attempt));
+    webFetchBackoffUntil=Date.now()+delay;
+   }
+  }
+ }finally{webFetchRelease();}
 }
 async function bingToken(){if(bingAuth&&Date.now()-bingAuth.time<7*60000)return bingAuth.token;const token=(await(await webFetch('https://edge.microsoft.com/translate/auth')).text()).trim();if(!token||token.startsWith('<'))throw Error('تعذر تهيئة Bing.');bingAuth={token,time:Date.now()};return token;}
 async function yandexSession(){
@@ -78,23 +117,24 @@ async function yandexSession(){
  const html=await(await webFetch('https://translated.turbopages.org/proxy_u/en-es.en/https/example.com/')).text();
  const sid=html.match(/sid\s*:\s*['"]([0-9a-f.]+)['"]/i)?.[1];if(!sid)throw Error('تعذر تهيئة Yandex.');yandexAuth={sid,time:Date.now()};return sid;
 }
-async function webTranslatePart(engine,text,source,target){
+function bayanFetchOpts(input,extra={}){return input?.bayanPriority?{...extra,bayanPriority:input.bayanPriority}:extra;}
+async function webTranslatePart(engine,text,source,target,input){
  if(engine==='google'){
   const url=new URL('https://translate.googleapis.com/translate_a/single');for(const [k,v]of Object.entries({client:'gtx',sl:source||'auto',tl:target,dt:'t',q:text}))url.searchParams.set(k,v);
-  const data=await(await webFetch(url.href)).json();const translated=data?.[0]?.map(row=>row?.[0]||'').join('');if(!translated)throw Error('لم يُرجع Google ترجمة.');return {text:translated,source:data[2]||source};
+  const data=await(await webFetch(url.href,bayanFetchOpts(input))).json();const translated=data?.[0]?.map(row=>row?.[0]||'').join('');if(!translated)throw Error('لم يُرجع Google ترجمة.');return {text:translated,source:data[2]||source};
  }
  if(engine==='bing'){
   const auth=await webSpeechAuth(AbortSignal.timeout(18000)),url=new URL('https://www.bing.com/ttranslatev3');for(const [k,v]of Object.entries({isVertical:'1',IG:auth.ig,IID:auth.iid+'.1'}))url.searchParams.set(k,v);
-  const data=await(await webFetch(url.href,{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({fromLang:source||'auto-detect',to:target,text,key:String(auth.key),token:auth.token}).toString()})).json();
+  const data=await(await webFetch(url.href,bayanFetchOpts(input,{method:'POST',credentials:'include',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({fromLang:source||'auto-detect',to:target,text,key:String(auth.key),token:auth.token}).toString()}))).json();
   if(!data?.[0]?.translations?.[0]?.text)throw Error('لم يُرجع Bing ترجمة.');return {text:data[0].translations[0].text,source:data[0].detectedLanguage?.language||source};
  }
  if(engine==='yandex'){
   const sid=await yandexSession(),url=new URL('https://translate.yandex.net/api/v1/tr.json/translate');
   for(const [k,v]of Object.entries({srv:sid.length>40?'tr-touch-url':'tr-url-widget',id:sid+'-0-0',format:'plain',lang:source?`${source}-${target}`:target,text}))url.searchParams.set(k,v);
-  const data=await(await webFetch(url.href)).json();if(data.code!==200||!data.text?.length)throw Error('لم يُرجع Yandex ترجمة.');return {text:data.text.join(''),source:data.lang?.split('-')[0]||source};
+  const data=await(await webFetch(url.href,bayanFetchOpts(input))).json();if(data.code!==200||!data.text?.length)throw Error('لم يُرجع Yandex ترجمة.');return {text:data.text.join(''),source:data.lang?.split('-')[0]||source};
  }
  if(engine==='deepl'){
-  const data=await(await webFetch('https://oneshot-free.www.deepl.com/v1/storefront/translate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language_model:'next-gen',source_lang:source||'auto',target_lang:target==='en'?'en-US':target,usage_type:'Translate',text:[text]})})).json();
+  const data=await(await webFetch('https://oneshot-free.www.deepl.com/v1/storefront/translate',bayanFetchOpts(input,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({language_model:'next-gen',source_lang:source||'auto',target_lang:target==='en'?'en-US':target,usage_type:'Translate',text:[text]})}))).json();
   if(!data.translations?.[0]?.text)throw Error('لم يُرجع DeepL ترجمة لهذه اللغة.');return {text:data.translations[0].text,source:data.translations[0].detected_source_language?.toLowerCase()||source};
  }
  throw Error('محرك غير معروف.');
@@ -112,7 +152,7 @@ async function translateWeb(input){
   if(prefs.webCache!==false){const stored=await pageCacheGet(await pageCacheKey(['text',engine,source,target,text]));if(stored?.text){const result={text:stored.text,source:stored.detected||source,engine:stored.engine||engine,fallback:engine!==primary,cached:true};if(webCache.size>=100)webCache.delete(webCache.keys().next().value);webCache.set(key,result);return result;}}
   try{
    const chunks=splitWebText(text,engine==='google'||engine==='yandex'?1800:4500),translated=[];let detected=source;
-   for(const part of chunks){const result=await webTranslatePart(engine,part,source,target);translated.push(result.text);if(result.source)detected=result.source;}
+   for(const part of chunks){const result=await webTranslatePart(engine,part,source,target,input);translated.push(result.text);if(result.source)detected=result.source;}
    const result={text:translated.join(' '),source:detected,engine,fallback:engine!==primary};if(prefs.webCache!==false){if(webCache.size>=100)webCache.delete(webCache.keys().next().value);webCache.set(key,result);await pageCachePut(await pageCacheKey(['text',engine,source,target,text]),{text:result.text,detected:result.source,engine:result.engine});}return result;
   }catch(e){lastError=e;}
  }
@@ -135,10 +175,10 @@ async function translatePagePieces(input){
  if(cacheKey)await pageCachePut(cacheKey,{items,engine,detected,fallback});
  return {items,engine,source:detected,fallback};
 }
-async function googleTranslateHtmlQueries(queries,source,target){
+async function googleTranslateHtmlQueries(queries,source,target,input){
  const params=new URLSearchParams();params.set('client','gtx');params.set('sl',source||'auto');params.set('tl',target);params.set('format','html');
  for(const query of queries)params.append('q',query);
- const data=await(await webFetch('https://translate.googleapis.com/translate_a/t?'+params.toString())).json();
+ const data=await(await webFetch('https://translate.googleapis.com/translate_a/t?'+params.toString(),bayanFetchOpts(input))).json();
  const list=Array.isArray(data)?data:typeof data==='string'?[data]:null;
  if(!list||list.length!==queries.length||list.some(item=>typeof item!=='string'||!item.trim()))throw Error('لم يُرجع Google ترجمة.');
  return list;
@@ -155,7 +195,7 @@ async function translateJobWithPieces(job,input){
 async function translateGooglePack(pack,ctx,input){
  let translated=null,lastError;
  for(let attempt=0;attempt<2&&!translated;attempt++){
-  try{translated=await googleTranslateHtmlQueries(pack.map(job=>job.query),ctx.source,ctx.target);}
+  try{translated=await googleTranslateHtmlQueries(pack.map(job=>job.query),ctx.source,ctx.target,input);}
   catch(e){lastError=e;if(attempt===0&&/حدّت/.test(e.message||''))await new Promise(resolve=>setTimeout(resolve,600));}
  }
  if(!translated){for(const job of pack){try{await translateJobWithPieces(job,input);}catch{job.error=lastError?.message;}}}

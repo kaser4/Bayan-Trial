@@ -10,7 +10,16 @@ function applyTwpConfig(p){const next={targetLanguage:p.pageTarget||'ar',targetL
 const twpConfig={get:key=>twpConfigValues[key],set:(key,value)=>{twpConfigValues[key]=value;twpChangeListeners.forEach(fn=>fn(key,value));},onReady:()=>twpConfigReady,onChanged:fn=>twpChangeListeners.push(fn)};
 document.addEventListener('click',event=>{if(self!==top||!twpSettings.prefs?.followTranslationLinks||event.button!==0||event.ctrlKey||event.metaKey||event.shiftKey)return;const a=event.target.closest?.('a[href]');if(a&&(!a.target||a.target==='_self'))chrome.runtime.sendMessage({type:'twp-follow-link',url:a.href}).catch(()=>{});},true);
 const showOriginal={isEnabled:false,enable(){this.isEnabled=!!twpSettings.prefs?.showOriginalHover;},disable(){for(const node of twpOriginalNodes)node.removeAttribute('title');twpOriginalNodes=[];this.isEnabled=false;},add(node){node.title=node.textContent;twpOriginalNodes.push(node);},enabledObserverSubscribe(){}};
-function twpEmit(){globalThis.bayanPageStateChanged?.(globalThis.BayanPage?.status());}
+let twpBgDoneSent=false;
+function twpEmit(){
+ globalThis.bayanPageStateChanged?.(globalThis.BayanPage?.status());
+ if(self!==top||!globalThis.twpBgHiddenTranslate)return;
+ const status=globalThis.BayanPage?.status();
+ if(!status||status.running||!status.translated||twpBgDoneSent)return;
+ if(!(status.done>0||status.remaining===0||status.total===0))return;
+ twpBgDoneSent=true;globalThis.twpBgHiddenTranslate=false;
+ chrome.runtime.sendMessage({type:'bg-translate-done'}).catch(()=>{});
+}
 async function twpRun(message){
  const generation=twpBridgeGeneration;twpStats.active++;twpEmit();
  try{
@@ -38,13 +47,18 @@ const twpBridge={send(message,callback=()=>{}){
  queueMicrotask(()=>callback());
 }};
 let twpLocalSettings={},twpState='original';
+globalThis.twpBgHiddenTranslate=false;
 globalThis.BayanPage={
  status(){const remaining=globalThis.twpEngine?.remaining?.()||0;return {running:twpStats.active>0,total:globalThis.twpEngine?.total?.()||0,done:twpStats.done,failed:twpStats.failed,remaining,translated:twpState==='translated',engines:twpStats.engines,note:twpStats.note||(twpState==='original'?'النص الأصلي.':twpState==='paused'?'توقفت الترجمة.':twpStats.active?'جارٍ ترجمة الصفحة…':remaining?'تُترجم بقية الصفحة أثناء التمرير.':'اكتملت ترجمة الصفحة.')};},
- start(settings={}){twpBridgeGeneration++;twpStats={active:0,done:0,failed:0,engines:[]};twpLocalSettings=settings;twpState='translated';twpEngineReady.then(()=>{twpConfig.set('translateDynamicallyCreatedContent',settings.dynamic===false?'no':'yes');globalThis.twpEngine.start(settings);twpEmit();});return this.status();},
- stop(){twpBridgeGeneration++;twpStats.active=0;twpState='paused';globalThis.twpEngine?.stop();twpEmit();return this.status();},
- restore(){twpBridgeGeneration++;twpStats={active:0,done:0,failed:0,engines:[]};twpState='original';globalThis.twpEngine?.restore();twpEmit();return this.status();}
+ start(settings={}){twpBridgeGeneration++;twpStats={active:0,done:0,failed:0,engines:[]};twpBgDoneSent=false;twpLocalSettings=settings;twpState='translated';twpEngineReady.then(()=>{twpConfig.set('translateDynamicallyCreatedContent',settings.dynamic===false?'no':'yes');globalThis.twpEngine.start(settings);twpEmit();});return this.status();},
+ stop(){twpBridgeGeneration++;twpStats.active=0;twpState='paused';globalThis.twpBgHiddenTranslate=false;globalThis.twpEngine?.stop();twpEmit();return this.status();},
+ restore(){twpBridgeGeneration++;twpStats={active:0,done:0,failed:0,engines:[]};twpState='original';globalThis.twpBgHiddenTranslate=false;globalThis.twpEngine?.restore();twpEmit();return this.status();}
 };
+function bayanAutoSettings(extra={}){return {engine:twpConfig.get('pageTranslatorService')||'google',target:twpConfig.get('targetLanguage')||'ar',source:'auto',dynamic:twpConfig.get('translateDynamicallyCreatedContent')!=='no',lazy:true,dontSortResults:twpConfig.get('dontSortResults')==='yes',...extra};}
+globalThis.bayanRequestBackgroundTranslate=()=>chrome.runtime.sendMessage({type:'bg-translate-request'}).catch(()=>{});
+globalThis.bayanNotifyTabVisible=()=>{globalThis.twpBgHiddenTranslate=false;return chrome.runtime.sendMessage({type:'bg-translate-visible'}).catch(()=>{});};
 chrome.runtime.onMessage.addListener((message,sender,reply)=>{
  if(message.type==='prefs-updated'){twpSettings.prefs=message.prefs;applyTwpConfig(message.prefs||{});}
+ if(message.type==='bg-translate-grant'&&self===top){globalThis.twpBgHiddenTranslate=true;twpBgDoneSent=false;BayanPage.start(bayanAutoSettings({...message.settings,lazy:true}));reply({ok:true});}
  if(message.type==='twp-subframe-action'&&self!==top){if(message.action==='start'&&twpSettings.prefs?.translateFrames!==false)BayanPage.start(message.settings);if(message.action==='restore')BayanPage.restore();if(message.action==='stop')BayanPage.stop();reply({ok:true});}
 });

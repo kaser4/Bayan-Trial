@@ -489,6 +489,7 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
   }
 
   let pageIsVisible = document.visibilityState == "visible";
+  let maybeAutoTranslate = function () {};
   // isto faz com que partes do youtube não sejam traduzidas
   // new IntersectionObserver(entries => {
   //         if (entries[0].isIntersecting && document.visibilityState == "visible") {
@@ -510,10 +511,16 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
   const handleVisibilityChange = function () {
     if (document.visibilityState == "visible") {
       pageIsVisible = true;
+      globalThis.twpBgHiddenTranslate = false;
+      globalThis.bayanNotifyTabVisible?.();
+      if (pageLanguageState === "original" && alreadyGotTheLanguage) {
+        maybeAutoTranslate(originalTabLanguage);
+      }
     } else {
       pageIsVisible = false;
     }
 
+    // Dynamic content is only watched while the tab is actually visible.
     if (pageIsVisible && pageLanguageState === "translated") {
       enableMutatinObserver();
     } else {
@@ -974,7 +981,7 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
   function translationRoutine() {
  const bayanGeneration=fooCount;
     try {
-      if (piecesToTranslate && pageIsVisible) {
+      if (piecesToTranslate && (pageIsVisible || globalThis.twpBgHiddenTranslate)) {
         (function () {
           if (piecesToTranslate.length < 1) return;
           const innerHeight = window.innerHeight;
@@ -1176,7 +1183,8 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
 
     translatePageTitle();
 
-    enableMutatinObserver();
+    if (pageIsVisible) enableMutatinObserver();
+    else disableMutatinObserver();
 
     translationRoutine();
   };
@@ -1346,10 +1354,87 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
     }
   });
 
-  // Requests the detection of the tab language in the background
+  // Language detect + auto-translate. Background tabs request a one-at-a-time slot
+  // instead of waiting for the user to focus the tab.
   if (window.self === window.top) {
     // is main frame
-    const onTabVisible = function () {
+    function startAutoTranslate() {
+      if (pageLanguageState !== "original") return;
+      const settings = {
+        engine: currentPageTranslatorService,
+        target: currentTargetLanguage,
+        source: currentSourceLanguage,
+        dynamic: twpConfig.get("translateDynamicallyCreatedContent") === "yes",
+        lazy: true,
+        dontSortResults: !!dontSortResults,
+      };
+      if (document.visibilityState === "visible") {
+        globalThis.twpBgHiddenTranslate = false;
+        BayanPage.start(settings);
+        return;
+      }
+      globalThis.bayanRequestBackgroundTranslate?.();
+    }
+    maybeAutoTranslate = function (result) {
+      result = result || "und";
+      if (result === "und") {
+        if (
+          (twpConfig.get("alwaysTranslateSites").indexOf(tabHostName) !== -1 ||
+            (location.hostname === "pdf.translatewebpages.org" &&
+              twpConfig.get("neverTranslateSites").indexOf(tabHostName) ===
+                -1)) &&
+          !platformInfo.isMobile.any
+        ) {
+          startAutoTranslate();
+        }
+        return;
+      }
+      const langCode = twpLang.fixTLanguageCode(result);
+      if (
+        (location.hostname === "pdftohtml.translatewebpages.org" &&
+          location.href.indexOf("?autotranslate") !== -1 &&
+          twpConfig.get("neverTranslateSites").indexOf(tabHostName) === -1) ||
+        (location.hostname === "pdf.translatewebpages.org" &&
+          twpConfig.get("neverTranslateSites").indexOf(tabHostName) === -1)
+      ) {
+        startAutoTranslate();
+        return;
+      }
+      if (
+        location.hostname === "translate.googleusercontent.com" ||
+        location.hostname === "translate.google.com" ||
+        location.hostname === "translate.yandex.com" ||
+        location.hostname === "www.deepl.com" ||
+        location.hostname === "translated.turbopages.org" ||
+        location.hostname.endsWith("translate.goog") ||
+        location.hostname === "sberbank.com" ||
+        location.hostname === "www.sberbank.com"
+      ) {
+        return;
+      }
+      if (
+        pageLanguageState !== "original" ||
+        chrome.extension.inIncognitoContext
+      ) {
+        return;
+      }
+      if (twpConfig.get("neverTranslateSites").indexOf(tabHostName) !== -1) {
+        return;
+      }
+      if (
+        langCode &&
+        langCode !== currentTargetLanguage &&
+        twpConfig.get("alwaysTranslateLangs").indexOf(langCode) !== -1
+      ) {
+        startAutoTranslate();
+      } else if (
+        twpConfig.get("alwaysTranslateSites").indexOf(tabHostName) !== -1 &&
+        !platformInfo.isMobile.any
+      ) {
+        startAutoTranslate();
+      }
+    };
+    const onTabReady = function () {
       twpBridge.send(
         {
           action: "detectTabLanguage",
@@ -1360,99 +1445,20 @@ Promise.all([twpConfig.onReady(), getTabHostName()]).then(function (_) {
           result = result || "und";
           if (result === "und") {
             originalTabLanguage = result;
-            if (
-              (twpConfig.get("alwaysTranslateSites").indexOf(tabHostName) !==
-                -1 ||
-                (location.hostname === "pdf.translatewebpages.org" &&
-                  twpConfig.get("neverTranslateSites").indexOf(tabHostName) ===
-                    -1)) &&
-              !platformInfo.isMobile.any
-            ) {
-              pageTranslator.translatePage();
-            }
           } else {
             const langCode = twpLang.fixTLanguageCode(result);
             if (langCode) {
               originalTabLanguage = langCode;
             }
-            if (
-              (location.hostname === "pdftohtml.translatewebpages.org" &&
-                location.href.indexOf("?autotranslate") !== -1 &&
-                twpConfig.get("neverTranslateSites").indexOf(tabHostName) ===
-                  -1) ||
-              (location.hostname === "pdf.translatewebpages.org" &&
-                twpConfig.get("neverTranslateSites").indexOf(tabHostName) ===
-                  -1)
-            ) {
-              pageTranslator.translatePage();
-            } else {
-              if (
-                location.hostname !== "translate.googleusercontent.com" &&
-                location.hostname !== "translate.google.com" &&
-                location.hostname !== "translate.yandex.com" &&
-                location.hostname !== "www.deepl.com" &&
-                location.hostname !== "translated.turbopages.org" &&
-                !location.hostname.endsWith("translate.goog") &&
-                location.hostname !== "sberbank.com" &&
-                location.hostname !== "www.sberbank.com" // https://github.com/FilipePS/Traduzir-paginas-web/issues/619
-              ) {
-                if (
-                  pageLanguageState === "original" &&
-                  // !platformInfo.isMobile.any &&
-                  !chrome.extension.inIncognitoContext
-                ) {
-                  if (
-                    twpConfig
-                      .get("neverTranslateSites")
-                      .indexOf(tabHostName) === -1
-                  ) {
-                    if (
-                      langCode &&
-                      langCode !== currentTargetLanguage &&
-                      twpConfig
-                        .get("alwaysTranslateLangs")
-                        .indexOf(langCode) !== -1
-                    ) {
-                      pageTranslator.translatePage();
-                    } else if (
-                      twpConfig
-                        .get("alwaysTranslateSites")
-                        .indexOf(tabHostName) !== -1 &&
-                      !platformInfo.isMobile.any
-                    ) {
-                      pageTranslator.translatePage();
-                    }
-                  }
-                }
-              }
-            }
           }
 
+          maybeAutoTranslate(result);
           observers.forEach((callback) => callback(originalTabLanguage));
           alreadyGotTheLanguage = true;
         }
       );
     };
-    setTimeout(function () {
-      if (document.visibilityState == "visible") {
-        onTabVisible();
-      } else {
-        const handleVisibilityChange = function () {
-          if (document.visibilityState == "visible") {
-            document.removeEventListener(
-              "visibilitychange",
-              handleVisibilityChange
-            );
-            onTabVisible();
-          }
-        };
-        document.addEventListener(
-          "visibilitychange",
-          handleVisibilityChange,
-          false
-        );
-      }
-    }, 150);
+    setTimeout(onTabReady, 150);
   } else {
     // is subframe (iframe)
     twpBridge.send(
