@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "بيان — Bayan Translator (Trial)",
+  "version": "0.8.18",
+  "description": "ترجمة عربية بنافذة عائمة وزر قابل للتخصيص — نسخة تجريبية لـ Vivaldi.",
+  "permissions": [
+    "storage",
+    "contextMenus",
+    "tts",
+    "activeTab",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*",
+    "https://translate.googleapis.com/*",
+    "https://translate.google.com/*",
+    "https://edge.microsoft.com/*",
+    "https://www.bing.com/*",
+    "https://translated.turbopages.org/*",
+    "https://translate.yandex.net/*",
+    "https://oneshot-free.www.deepl.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "بيان — ترجمة",
+    "default_popup": "app.html"
+  },
+  "options_page": "app.html?settings=1",
+  "commands": {
+    "translate-selection": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "ترجمة النص المحدد"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "twp-runtime.js",
+        "twp-page-translator.js",
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "app.html",
+        "app.js",
+        "app.css"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'none'; frame-ancestors http: https: 'self'"
+  }
+}
