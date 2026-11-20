@@ -1,4 +1,4 @@
-# بيان — Bayan Translator
+﻿# بيان — Bayan Translator
 
 إضافة ترجمة عربية للمتصفح (تجريبية)، بواجهة عربية ونافذة عائمة لترجمة النص المحدد، مع ترجمة صفحات المواقع على نهج TWP.
 
@@ -30,7 +30,8 @@
 
 | الإصدار | الحالة |
 |---------|--------|
-| [0.8.18](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.18) | الأحدث |
+| [0.8.25](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.25) | الأحدث |
+| [0.8.18](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.18) | سابق |
 | [0.8.13](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.13) | سابق |
 | [0.8.12](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.12) | سابق |
 | [0.8.9](https://github.com/kaser4/Bayan-Trial/releases/tag/v0.8.9) | أول رفع منظم |
@@ -47,3 +48,4 @@
 أجزاء من منطق ترجمة الصفحة مستمدة من مشروع TWP بموجب MPL-2.0. انظر `THIRD-PARTY-NOTICES.md` و`licenses/TWP-MPL-2.0.txt` داخل حزمة الإصدار.
 
 بيان مشروع مستقل بواجهته الخاصة — نسخة تجريبية.
+
